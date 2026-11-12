@@ -1,0 +1,85 @@
+"""Dependency-free validation of additive model diagnostics sent to the browser."""
+import math
+import re
+from datetime import timedelta
+
+from ..adapters.weathernext import timestamp, query_sql
+from . import FEATURES, POLICY, TARGET, finite
+
+
+def details(value, score):
+    keys = {"susceptibility", "raw_susceptibility", "rainfall_6h_mm", "rainfall_stress",
+            "model_instability", "baseline", "attributions"}
+    if not isinstance(value, dict) or not keys <= set(value) or set(value)-keys-{"fema_mapped_area_fraction"} or score is None:
+        raise ValueError("Invalid model diagnostics")
+    reference = value.get("fema_mapped_area_fraction")
+    if reference is not None and (not finite(reference) or not 0 <= reference <= 1):
+        raise ValueError("Invalid FEMA reference fraction")
+    if any(not finite(value[k]) for k in keys-{"attributions"}):
+        raise ValueError("Nonfinite model diagnostics")
+    attrs = value["attributions"]
+    if (not 0 <= value["susceptibility"] <= 1 or not 0 <= value["rainfall_stress"] < 1
+            or value["rainfall_6h_mm"] < 0 or not 0 <= value["model_instability"] <= .5
+            or not isinstance(attrs, dict) or set(attrs) != set(FEATURES)
+            or not all(finite(v) for v in attrs.values())
+            or not math.isclose(value["baseline"]+sum(attrs.values()), value["raw_susceptibility"], abs_tol=1e-6)
+            or not math.isclose(value["rainfall_stress"], value["rainfall_6h_mm"]/(value["rainfall_6h_mm"]+50), abs_tol=1e-8)
+            or not math.isclose(score, 100*value["susceptibility"]*value["rainfall_stress"], abs_tol=1e-5)):
+        raise ValueError("Inconsistent model diagnostics")
+    return value
+
+
+def metadata(value):
+    required = {"schema_version", "model_version", "target", "policy", "promoted", "model_sha256", "notice"}
+    lineage = {"training_dataset_id", "evaluation_sha256", "evaluation_protocol", "evaluation_summary"}
+    if (not isinstance(value, dict) or not required <= set(value) or set(value)-required-lineage-{"inference_population"}
+            or value["schema_version"] != 1 or value["target"] != TARGET or value["policy"] != POLICY
+            or value["promoted"] is not True or not isinstance(value["model_version"], str)
+            or not 1 <= len(value["model_version"]) <= 200
+            or not isinstance(value["model_sha256"], str) or not re.fullmatch("[0-9a-f]{64}", value["model_sha256"])
+            or not isinstance(value["notice"], str) or not 1 <= len(value["notice"]) <= 1000):
+        raise ValueError("Invalid/unpromoted model metadata")
+    if (set(value) & (lineage | {"inference_population"})
+            or value["model_version"].startswith(("mapped-susceptibility-v2-", "mapped-susceptibility-v3-positive-", "mapped-susceptibility-v4-positive-"))):
+        from .v2 import protocol_for
+        protocol = protocol_for(value.get("evaluation_protocol"))
+        if (not lineage <= set(value)
+                or any(not isinstance(value[k], str) or not re.fullmatch("[0-9a-f]{64}", value[k])
+                       for k in ("training_dataset_id", "evaluation_sha256"))):
+            raise ValueError("Incomplete v2 evaluation lineage")
+        positive = protocol.get("inference_population") == "positive_fema_overlap"
+        if (positive != (value.get("inference_population") == "positive_fema_overlap")
+                or (not positive and "inference_population" in value)
+                or positive != value["model_version"].startswith(("mapped-susceptibility-v3-positive-", "mapped-susceptibility-v4-positive-"))
+                or (positive and not value["model_version"].startswith("mapped-susceptibility-"+protocol["id"].rsplit("-", 1)[-1]+"-positive-"))):
+            raise ValueError("Assessment population identity mismatch")
+        summary = value["evaluation_summary"]
+        if (not isinstance(summary, dict) or set(summary) != {"macro_subgroup_mae", "fully_mapped_mae", "parcel_rmse", "equal_block_rmse", "coverage"}
+                or any(not finite(v) or not 0 <= v <= 1 for v in summary.values())
+                or summary["coverage"] < .9):
+            raise ValueError("Invalid v2 evaluation summary")
+    return value
+
+
+def forecast(value):
+    allowed = {"status", "init_time", "published_at", "retrieved_at", "source_table", "native_resolution", "statistic",
+               "units", "valid_from", "valid_to", "expires_at", "source_sha256", "mode", "availability_basis"}
+    if (not isinstance(value, dict) or set(value) != allowed or value["status"] not in ("ready", "stale")
+            or value["native_resolution"] != "0.1 degree" or value["statistic"] != "ensemble_mean"
+            or value["units"] != "mm / 6h" or value["mode"] not in ("current", "replay")
+            or not isinstance(value["source_sha256"], str) or not re.fullmatch("[0-9a-f]{64}", value["source_sha256"])):
+        raise ValueError("Invalid model forecast provenance")
+    query_sql(value["source_table"])
+    for key in ("init_time", "retrieved_at", "valid_from", "valid_to", "expires_at"):
+        timestamp(value[key])
+    if value["published_at"] is not None:
+        timestamp(value["published_at"])
+    init, start, end, retrieved, expires = [timestamp(value[k]) for k in
+                                            ("init_time", "valid_from", "valid_to", "retrieved_at", "expires_at")]
+    if (end-start != timedelta(hours=6) or init > start or retrieved < init
+            or (value["status"] == "ready" and start-init > timedelta(hours=12))
+            or expires > min(init+timedelta(hours=12), retrieved+timedelta(hours=2), end)
+            or value["availability_basis"] not in ("publication-constrained", "initialization-based reconstruction")
+            or (value["published_at"] is not None and not init <= timestamp(value["published_at"]) <= start)):
+        raise ValueError("Inconsistent model forecast times")
+    return value

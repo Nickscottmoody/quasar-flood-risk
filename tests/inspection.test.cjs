@@ -1,0 +1,81 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const {forecastRows,parcelRows}=require('../quasar/static/inspection.js');
+const geometry={type:'Polygon',coordinates:[[[0,0],[1,0],[1,1],[0,0]]]};
+const context={forecast_overlaps:[{native_cell_id:'a',geometry,area_fraction:.4},{native_cell_id:'b',geometry,area_fraction:.6}],
+ inputs:{terrain:{status:'no_pixel_centers',min_m:null,mean_m:null,max_m:null,representative_point_m:0},fema:{status:'partial',mapped_area_fraction:.3,unmapped_area_fraction:.7,zones:['AE','X'],overlaps:[{FLD_ZONE:'X',ZONE_SUBTY:'AREA OF MINIMAL FLOOD HAZARD',parcel_area_fraction:.2}]}}};
+function current(status='ready',rain=0){return {mode:'mixed_forecast_demo',forecast:{init_time:'init'},weather_cells:{valid_from:'start',valid_to:'end',retrieved_at:'import',native_resolution:'0.1 degree',features:[{id:'a',geometry,properties:{status,rainfall_6h_mm:rain}},{id:'b',geometry,properties:{status:'incomplete',rainfall_6h_mm:null}}]}};}
+test('native overlaps remain separate; valid zero, missing and stale rainfall differ',()=>{
+ const rows=forecastRows(context,current());assert.match(rows[0][1],/^0.0 mm/);assert.match(rows[1][1],/incomplete/);
+ assert.match(forecastRows(context,current('stale',0))[0][1],/Unavailable.*stale/);
+ assert.match(forecastRows(context,{mode:'synthetic_demo'})[0][1],/Exercise rainfall is not applied/);
+ const changed=current();changed.weather_cells.features[0].geometry={type:'Polygon',coordinates:[]};
+ assert.match(forecastRows(context,changed)[0][1],/not matched/);
+});
+test('changing replay values updates context without a geometry join or score',()=>{
+ assert.match(forecastRows(context,current('ready',7))[0][1],/^7.0 mm/);
+ const replay={...current('ready',12),mode:'what_if_exercise'};
+ assert.match(forecastRows(context,replay)[0][1],/^12.0 mm/);
+ assert.match(forecastRows(context,replay).at(-1)[1],/synthetic what-if/);
+});
+test('partial FEMA, X subtypes and a zero point sample do not fill polygon terrain or establish safety',()=>{
+ const rows=parcelRows(context,current()), byLabel=new Map(rows);
+ assert.match(byLabel.get('Terrain minimum / mean / maximum'),/Unknown \/ Unknown \/ Unknown/);
+ assert.equal(byLabel.get('Interior point sample (separate)'),'0.00 m');
+ assert.equal(byLabel.get('FEMA mapped / unmapped'),'30.00% / 70.00%');
+ assert.ok(rows.some(([label])=>label.includes('AREA OF MINIMAL')));
+ assert.equal(byLabel.get('Hydrologic connectivity / gauge linkage'),'Unknown; mapped proximity is descriptive only');
+});
+
+test('parcel rainfall headline preserves zero, partial overlap and geometry mismatches',()=>{
+ const {rainfallSummary}=require('../quasar/static/inspection.js');
+ const partial=rainfallSummary(context,current());
+ assert.equal(partial.value,'0.0');assert.match(partial.detail,/1\/2.*Partial coverage/);
+ assert.match(partial.detail,/reported at native resolution; parcels in the same native cell share its source value/);
+ const oneNativeCell=()=>({forecast_overlaps:[{native_cell_id:'a',geometry,area_fraction:1}]});
+ const sameNativeCell=current('ready',85.6);
+ const parcelValues=[oneNativeCell(),oneNativeCell()].map(parcel=>rainfallSummary(parcel,sameNativeCell));
+ assert.deepEqual(parcelValues.map(summary=>summary.value),['85.6','85.6']);
+ assert.ok(parcelValues.every(summary=>summary.detail.includes('share its source value')));
+ const reorderedGeometry={coordinates:geometry.coordinates,type:geometry.type};
+ const reordered=current('ready',13);reordered.weather_cells.features[0].geometry=reorderedGeometry;
+ assert.equal(rainfallSummary(context,reordered).value,'13.0');
+ assert.equal(rainfallSummary(context,current('stale',4)).value,'Unavailable');
+ const both=current();both.weather_cells.features[1].properties={status:'ready',rainfall_6h_mm:12};
+ assert.equal(rainfallSummary(context,both).value,'0.0–12.0');
+ both.weather_cells.features[1].geometry={type:'Polygon',coordinates:[]};
+ assert.equal(rainfallSummary(context,both).value,'0.0');
+ assert.equal(rainfallSummary(null,current()).value,'Unavailable');
+});
+
+test('parcel rainfall headline weights native values by the parcel overlap and requires full coverage',()=>{
+ const {parcelRainfallSummary}=require('../quasar/static/inspection.js');
+ const features=[
+  {id:'a',geometry,properties:{status:'ready',rainfall_6h_mm:10}},
+  {id:'b',geometry:{type:'Polygon',coordinates:[[[2,0],[3,0],[3,1],[2,0]]]},properties:{status:'ready',rainfall_6h_mm:20}}
+ ];
+ const current={weather_cells:{native_resolution:'0.1 degree',features}};
+ const context={forecast_overlaps:[
+  {native_cell_id:'a',geometry,area_fraction:.4},
+  {native_cell_id:'b',geometry:features[1].geometry,area_fraction:.6}
+ ]};
+ const summary=parcelRainfallSummary(context,current);
+ assert.equal(summary.value,'16.0');
+ assert.match(summary.detail,/Area-weighted estimate.*2 native forecast cells \(0.1 degree\)/);
+ assert.equal(parcelRainfallSummary({...context,forecast_overlaps:[{...context.forecast_overlaps[0],area_fraction:.4}]},current).value,'Unavailable');
+ assert.equal(parcelRainfallSummary(context,{weather_cells:{...current.weather_cells,features:[{...features[0],properties:{status:'ready',rainfall_6h_mm:10}}, {...features[1],properties:{status:'incomplete',rainfall_6h_mm:null}}]}}).value,'Unavailable');
+});
+
+test('parcel overview distinguishes mapped zero from unknown and flags incomplete coverage',()=>{
+ const {parcelOverview}=require('../quasar/static/inspection.js');
+ const unknown=parcelOverview(null);
+ assert.deepEqual(unknown.stats.map(([value])=>value),['Unknown','Unknown','Unknown']);
+ assert.match(unknown.insights.join(' '),/unknown.*incomplete/);
+ const overview=parcelOverview({inputs:{terrain:{status:'complete',mean_m:0},
+   fema:{status:'partial',sfha_mapped_area_fraction:0,overlaps:[{FLD_ZONE:'X'}]},
+   hydrography:{nearest_retained_river_stream_distance_m:0}}});
+ assert.deepEqual(overview.stats.map(([value])=>value),['0.00 m','0.0%','0 m']);
+ assert.match(overview.insights.join(' '),/rest is unknown/);
+ assert.match(overview.insights.join(' '),/reference zones: X.*revisions are unverified/);
+ assert.doesNotMatch(overview.insights.join(' '),/Terrain coverage is incomplete/);
+});

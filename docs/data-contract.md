@@ -1,0 +1,309 @@
+# Application data contract
+
+V2 adds an optional, validated lineage group to `model_metadata`:
+`training_dataset_id`, `evaluation_sha256`, `evaluation_protocol`, and
+`evaluation_summary` (macro subgroup MAE, fully mapped MAE, parcel/equal-block
+RMSE, feature support). The complete group is required for v2 identities; legacy
+assessments without it remain readable. `model_details` can include
+`fema_mapped_area_fraction`, null when the authoritative reference is incomplete.
+These are mapping metrics and reference fractions, not flood probabilities.
+The [v2 guide](modeling-v2.md) defines qualification and exact-version pinning.
+
+`GET /api/exposure` accepts optional `model=v1|v2` for explicit Tools selection.
+Ready selected-version responses echo `model_choice` and carry the corresponding
+pinned `model_metadata`. Both summary and parcel requests include the choice;
+the proxy forwards and verifies it. Per-choice files/directories and identity
+pins are configured separately, with no fallback to another version or the
+legacy source. Requests without `model` keep the original behavior. See
+[Tools model selection](exposure-display.md#tools-v1--v2-model-selection).
+
+Optional promoted mapping-proxy model metadata, forecast provenance and signed
+raw-model diagnostics extend schema-1 assessments additively; see
+[the exposure additions](exposure-display.md#optional-modeling-fields-schema-1-additive)
+and [offline modeling](modeling.md). Legacy assessment factors and unknown semantics
+remain unchanged; signed attribution is separate from nonnegative index factors.
+
+Only Okaloosa County FIPS `12091` is supported. Source initialization, validity,
+retrieval time, native resolution and units remain part of every forecast view.
+Unknown is distinct from zero. All application data comes from county sources;
+o public endpoint substitutes fictional sites or invented inputs.
+
+## Native forecast map and playback
+
+`GET /api/weather/timeline?source=current|archive` reads one configured schema-3
+county snapshot. Defaults to `archive`. The application exposes only the Isaias archive; explicit
+`source=current` API reads remain supported for offline integration compatibility. Other selectors, presets and what-if
+parameters are rejected. Missing, invalid, disconnected and legacy site-only
+imports return explicit status, a message and no frames.
+
+The response contains `county_fips`, `source`, `timezone`, `units` (`mm / 6h`),
+`status`, `default_index`, source metadata and `frames`. Each frame contains `at`
+and `collection`. The collection has no site features (`features: []`), mode
+`county_forecast` or `county_archive`, a scenario validity window, `forecast`
+metadata, and native polygon GeoJSON in `weather_cells`. It contains no fixture
+scores, terrain, gauge margins or synthetic rainfall increments.
+
+Current imports yield one forward six-hour frame per retained hourly start.
+Eighteen retained hours yield 13 frames. Expiry is the earliest original validity
+end, initialization plus 12 hours, or retrieval plus two hours. Real-time expiry
+applies to every frame, including later slider positions. Stale frames retain
+geometry/metadata with null rainfall. Missing/null hours remain incomplete;
+duplicate, negative and invalid inputs fail validation. Valid zero stays zero.
+
+Archive imports yield 25 positions from October 9 midnight through October 10
+midnight Central. They use archived forecasts available at each reconstruction
+clock, retaining per-cell initialization and publication constraints where known.
+They are not historical rainfall observations and never use what-if additions.
+
+The map's optional **Archived NEXRAD radar** overlay follows the selected replay
+start time, rounded down to a five-minute UTC interval. It displays the full
+`USCOMP-N0Q` reflectivity mosaic coverage and is not clipped to Okaloosa County;
+county boundaries, H3 cells and parcel outlines remain over the raster. The
+radar observation is at the selected clock, while the forecast below it covers
+the following six hours. Reflectivity is not a rainfall total, parcel estimate
+or flood observation.
+
+`GET /api/radar/tiles/{YYYYMMDDHHmm}/{z}/{x}/{y}.png` proxies an immutable
+Iowa Environmental Mesonet archived NEXRAD mosaic tile for the fixed replay
+window. Only five-minute timestamps within the replay and zoom levels 4–12 are
+accepted. The proxy uses a fixed upstream URL, validates PNG content and size,
+and caches validated requests in memory. Invalid time/coordinates return 400;
+an unavailable upstream image returns 502. The map credits the Mesonet service
+and NOAA/NWS radar data. This is separate from WeatherNext forecast imports.
+
+`GET /api/data/weather?source=archive` projects this shared archive pipeline into native-cell
+rows for the Data tab, without geometry or scoring. Frames contain `at`,
+`valid_to`, and rows with `native_cell_id`, `rainfall_6h_mm`, `available_hours`
+and `status`, retaining the selected initialization per frame and cell. Existing county/inventory checks remain in force.
+
+## Reports and downloads
+
+`GET /api/reports?source=current|archive&frame=N` returns source metadata, status,
+selected frame index, available `windows`, source collection and native-cell rows.
+The default source is `archive`. Frame defaults to
+the imported default. No available source yields no rows or collection.
+`GET /api/exports` accepts the same selectors plus `format=csv|geojson|zip`.
+CSV retains source/validity metadata and units; unknown rain is blank. GeoJSON
+retains native cell geometry. ZIP contains both formats and provenance JSON.
+All formats are based on one loaded snapshot. Unsupported selectors fail with
+400; unavailable sources cannot produce a replacement download.
+
+## Retired application endpoints
+
+`/api/scenarios`, `/api/properties`, `/api/timeline`, `/api/routes`,
+`/api/replay/context`, and POST `/api/notifications/preview` return 410.
+Offline research adapters and synthetic test fixtures are separate from the
+application contract. `/health` and `/api/config` identify `county_sources`.
+Health status alone does not establish data readiness.
+
+## Public application, private source credentials
+
+The hosted app, source tables, reports and downloads are public. No team password,
+sign-in form or session cookie is required. Only the application route/asset
+allowlist is served; raw databases, source files, `.env` and workspace files are
+not public. LinuxONE snapshot and parcel endpoints still require server-to-server
+authentication. No Google, bridge or parcel credential is sent to browsers.
+
+## Authenticated LinuxONE reads
+
+Vercel reads allowlisted snapshots at `/bridge/v1/snapshots/*` with the private
+bridge token and parcel APIs with `X-Quasar-Parcel-Token`. Secrets stay server-side.
+Errors never cause fallback to a different dataset. See `real-data-rollout.md`
+for service/proxy activation and artifact checks.
+
+## County grid and parcel browsing
+
+### Persistent inspection (additive)
+
+`GET /api/parcels/manifest` returns county, source mode/URL, dataset and boundary
+versions, CRS, retrieval time and geometry freshness. Indexed dataset versions
+include the parcel snapshot and cell-index checksums. Live GIS versions expire
+at the next UTC day; an ID inventory alone does not version changed shapes.
+The browser checks this manifest on entry and after 15 minutes before reuse.
+IndexedDB retains validated pages/progress for seven days, up to 100 MiB by LRU;
+failed checks preserve cached geometry with an explicit unavailable-source label.
+HTTP responses remain private/no-store; the application cache stores no credentials.
+
+`GET /api/parcels/{integer-id}/context?inventory_id=...` and
+`GET /api/cells/{h3-id}/summary?inventory_id=...` read the completed inspection
+artifact configured by `QUASAR_PARCEL_CONTEXT_DIRECTORY`. Its final manifest,
+SQLite checksum, county, parcel snapshot and boundary must match the indexed
+inventory. Responses keep `risk_score: null` and `risk_band: unknown`.
+Context contains descriptive `inputs`, `forecast_overlaps`, artifact version and
+`provenance`. Cell summaries support R4–R7 and count distinct indexed parcel IDs,
+with terrain/FEMA coverage counts. Missing artifacts return explicit unavailable
+states, never zero coverage. Invalid IDs/scope return 400; source failures 502.
+The same server-only parcel authentication/proxy applies to all these endpoints.
+
+Offline preparation copies verified descriptive records and computes positive-area
+native forecast overlaps in EPSG:26916, keeping native IDs, geometry and overlap
+fractions. Multiple cells remain separate. Parcel inspection rainfall comes only from the
+selected scenario's existing `weather_cells`, matched by native ID and geometry;
+stale/missing values stay null. Synthetic exercise rainfall is never assigned to
+real parcels. No runtime GIS dependency, cloud query or score calculation is added.
+
+`GET /api/county` returns a WGS84 GeoJSON collection with the single authoritative
+Census TIGERweb `GEOID=12091` boundary, source URL, retrieval time, CRS, units,
+license and processing notes. It is cached in memory for the UTC day. The browser
+fills all intersecting county cells at H3 resolutions 4, 5, 6 and 7, including
+coastal slivers and islands. Displayed hexagons and the selected-cell outline are clipped to the authoritative
+county polygon, retaining holes and islands. H3 IDs and parcel membership remain unchanged.
+Map search accepts a valid H3 cell ID as well as addresses and place names. It opens the existing cell inspector only when the cell intersects the authoritative county boundary.
+Zoom thresholds are 6.75, 8.5 and 10.75, matching TrialSmiles. No site-derived
+score exists for unoccupied cells; their score stays null.
+
+In rainfall mode the H3 grid is the only weather surface. A browser geometry join
+intersects each clipped hex with the imported native forecast polygons. Boundary-only
+contacts are excluded. The hex color is the **maximum** overlapping six-hour
+forecast, only when the geometry is fully covered and every overlapping native cell
+has a finite, nonnegative, ready value. Otherwise the fill remains transparent.
+The inspector retains the individual native values, their range, initialization,
+import time, source resolution and units. It requires no prepared parcel artifact.
+Geometry joins are cached per grid and native ID/geometry signature; every hour
+reads new rainfall, and a failed source reload clears colors. Native square outlines
+are not drawn. H3 does not increase forecast resolution, and the color is neither
+an area-weighted mean nor a parcel estimate. The browser uses the pure-JavaScript
+`polygon-clipping` library bundled in committed UI assets; Python/GIS runtime
+requirements are unchanged. Existing API payloads and exports retain native geometry.
+
+`GET /api/parcels?ring=<JSON closed lon/lat R7 ring>&offset=0` queries the fixed
+Okaloosa parcel GIS layer for intersecting polygons. Only `OBJECTID`
+and geometry are requested; owner, address and mailing fields are excluded. Every
+complete polygon is checked against the authoritative county geometry, including
+edges, concavities and holes. Boundary-crossing polygons are excluded rather
+than represented as wholly inside the county. This is an intersection inventory,
+so a parcel can appear in adjacent cells. It is not a count of homes or units.
+
+Responses contain `features`, `status: ready`, `source_total` (raw GIS matches),
+`checked_count`, page-local `excluded_count`, `next_offset` (null on completion),
+and `inventory_id`. Continue with the returned offset and inventory ID until
+null; there is no UI row cap. A changed ID inventory or incomplete source page
+fails explicitly. Each page has at most 100 source records. IDs are cached for
+five minutes in a bounded in-memory cache; each worker may reacquire them.
+County validation is authoritative geometry validation, not trust in a supplied
+FIPS or an envelope. Page/source failures are HTTP 502 with `status: unavailable`,
+never successful empty inventories. Bad requests and non-pilot FIPS are HTTP 400.
+The browser retains completed late pages in cache without changing the current
+selection, labels partial loads and offers retry. Only a completed load claims
+all source matches were checked. Lists show 50 searchable rows per page without
+limiting the complete inventory.
+
+Parcel properties are `parcel_id`, `county_fips: 12091`,
+`risk_score: null`, and `risk_band: unknown`. Metadata includes source/terms URLs,
+retrieval/inventory/boundary retrieval times, CRS `EPSG:4326`, degrees, license
+notes and processing steps. No forecast, terrain, FEMA or gauge joins are implied.
+Raw/derived research downloads stay in ignored `data/raw/` / `data/processed/`.
+Server runtime reads remain read-only. The browser persists public geometry and
+pagination in IndexedDB under the bounded inspection cache policy above.
+
+The server-only parcel proxy forwards the validated R7 `ring`, `cell`, `offset`
+and optional `inventory_id` together. The indexed host applies the same request
+validation before reading stored memberships; omitting the ring rejects the
+request before any parcel page is read. A replacement inventory invalidates
+in-flight and displayed inspection inputs. A selected parcel is relinked only
+after its ID appears in the replacement geometry page; otherwise the inspector
+returns to the cell until a parcel is selected from that inventory.
+
+Separate offline descriptive-input artifacts are defined in
+[parcel input preparation](parcel-inputs.md). Their terrain/FEMA/reference-distance
+fields enter the opt-in inspection endpoints above, separately from geometry.
+The optional [offline modeling pipeline](modeling.md) consumes verified descriptive
+inputs separately; inspection endpoints do not calculate scores. A complete artifact
+requires its final manifest; every research record retains null risk scores and explicit
+coverage/unknown states.
+
+
+## Okaloosa county weather (schema 3)
+
+County snapshots have `schema_version: 3`, county FIPS `12091`, kind `current_county_forecasts` or `historical_county_forecasts`, source table/model, native resolution/statistic/units, actual retrieval time, county geometry, `native_cells` and initialization-grouped `runs`. Each native cell retains ID, original WKT and GeoJSON geometry. IDs are SHA-256 of source WKT. Hourly rows reference the cell ID in `property_id`; `rainfall_1h_mm` is null or a nonnegative finite number. Duplicate cell/hour/run rows invalidate the snapshot. Current snapshots additionally carry `init_time`, `valid_from` and `valid_to`; historical ones carry the Central-time replay bounds.
+
+The importer selects native cells by authoritative county intersection; cells can
+extend beyond the boundary. Application views consume native-cell rainfall only,
+without associating fictional sites. County parcels remain unscored unless a
+separate matching exposure assessment exists. H3 does not replace native forecast
+polygons. Application forecast endpoints require schema 3; schemas 1/2 remain
+available only in offline research adapters. FIPS 12086 inputs are rejected.
+
+## Conditional model population
+
+The revised positive-overlap protocol uses optional model metadata field
+`inference_population: "positive_fema_overlap"`, required for model identities
+starting `mapped-susceptibility-v3-positive-` or `mapped-susceptibility-v4-positive-`. Those models train and evaluate
+only verified positive FEMA SFHA overlap. Assessment production returns null
+scores for zero overlap (`excluded_zero_fema_overlap`) and unknown/incomplete
+overlap (`verified_positive_fema_overlap_required`). These records remain in the
+county inventory and aggregation coverage denominator. Existing v1/v2 metadata
+and assessments retain their original population and remain schema-compatible.
+## Exact-window exposure catalog (server-only, version 1)
+
+`QUASAR_EXPOSURE_CATALOG` optionally names a bounded JSON catalog and requires
+`QUASAR_EXPOSURE_ARTIFACT_ROOT`. The configured catalog takes precedence over
+`QUASAR_EXPOSURE_FILE` and `QUASAR_EXPOSURE_DIRECTORY`; invalid files or absent windows never fall back to FILE.
+The existing `/api/exposure` query/response shape and `run_id` behavior are unchanged.
+Remote LinuxONE proxy configuration still takes precedence over local serving.
+
+Catalog fields: `schema_version: 1`, `county_fips: "12091"`, nonempty
+`inventory_id`, one expected 64-character lowercase `model_sha256`, and `entries`.
+Each entry has exactly `mode` (`replay`/`current`), timezone-aware `valid_from`,
+`valid_to` (exactly six hours later), relative `path`, file `sha256`, and
+`forecast_sha256`. The catalog is capped at 1 MiB and 256 entries. Duplicate
+mode/window keys, mixed county/inventory/model/source identities, multiwindow
+referenced files and mismatched artifact provenance are rejected. Every referenced
+artifact retains its existing schema-1 model/forecast metadata for that one window.
+Legacy single-file artifacts remain supported without requiring modeling metadata.
+
+Only relative files beneath the explicit root are resolved. Absolute paths,
+traversal and escaping symlinks fail closed. Each selected immutable file is
+hash-verified on cache load; size/mtime/ctime/inode version changes trigger rechecks.
+There is one decoded-artifact cache entry and eight small summary cache entries;
+resolution summaries do not retain full parcel maps. These are retention bounds,
+not a measured target-host peak-memory guarantee under concurrent requests.
+
+Use `python3 -m quasar.modeling assess-replay` to plan the actual saved 25-position
+archive. It is dry-run by default. `--execute` uses the existing producer per
+window, records source gaps and benchmark/count evidence, and publishes a new
+immutable release with `catalog.json` as final atomic completion marker. It never
+updates configuration, replaces a prior release, starts a service or queries cloud
+sources. See [operations](datathon-submission/operations.md#optional-all-hour-release).
+
+## Official alerts (separate current source)
+
+`GET /api/official-alerts` defaults to `source=archive` and returns
+`status: not_connected`, `connected: false`, no messages, and an explicit
+not-an-all-clear message. It never places present-day alerts on the replay.
+`source=current` reads only the operator-configured `QUASAR_NWS_ALERTS_FILE`;
+requests never fetch the network. Other source values/unknown query parameters
+are rejected. County scope remains 12091.
+
+The optional explicit `quasar.adapters.county_alerts` importer queries official
+county UGC FLC091, follows bounded same-host/same-county pagination, retains raw
+features and import/source metadata, and makes no retries in one invocation.
+Its coverage is the documented NWS county query, including intersecting zones;
+it is not exact parcel coverage. A missing alert polygon is allowed for zone
+products. No model score changes or overrides an official instruction.
+
+Current response states distinguish `not_connected`, `invalid`, `error`,
+`partial`, `stale`, fresh complete `empty`, and fresh complete `ready`.
+`connected` records whether a source page was read; it alone does not establish
+freshness/completeness. `retrieved_at`, `expires_at`, coverage/reference and
+source URL accompany usable parsed snapshots. Snapshots expire at 120 seconds;
+future retrieval times are invalid. Active/upcoming messages preserve official
+IDs, URLs, sent/effective/onset/expiry/end times, original text and message type.
+Updates/cancellations retire older referenced messages; duplicate identical IDs
+are deduplicated, conflicting duplicates invalidate the response. Future-issued,
+expired and cancelled messages cannot appear active. An empty fresh complete
+query means only no matching messages returned for that query/time, never safety.
+
+## Loading and serving optimizations
+
+See [loading performance](loading-performance.md) for explicit indexed exposure
+preparation, cache identity/freshness, worker behavior and benchmark evidence.
+Existing forecast/exposure response shapes are unchanged. Hashed UI/worker files
+are allowlisted by the committed build manifest and immutable; HTML and API
+responses remain no-store. Negotiated gzip preserves original JSON semantics.
+
+Authenticated source proxy reads now negotiate gzip too, enforcing the same
+wire and decoded byte caps before parsing. Invalid compressed responses remain
+unavailable. Request-local `Server-Timing` uses fixed phase names only. Snapshot
+and prepared-database caches include inode and change time so replacements do
+not reuse earlier validation; source failures and expiry still invalidate reads.

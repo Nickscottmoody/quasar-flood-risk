@@ -1,0 +1,157 @@
+/* Search and playback controls. Geocodes are temporary; playback never imports. */
+(function(root, factory) {
+  if (typeof module === "object" && module.exports) module.exports = factory();
+  else root.QuasarMapUI = factory();
+})(typeof globalThis !== "undefined" ? globalThis : this, function() {
+  "use strict";
+  function ringLocation(point, ring) {
+    let inside = false;
+    for (let i=1;i<ring.length;i++) {
+      const a=ring[i-1], b=ring[i];
+      const cross=(point[0]-a[0])*(b[1]-a[1])-(point[1]-a[1])*(b[0]-a[0]);
+      if (Math.abs(cross)<1e-12 && [0,1].every(k=>point[k]>=Math.min(a[k],b[k])-1e-12 && point[k]<=Math.max(a[k],b[k])+1e-12)) return 0;
+      if ((a[1]>point[1]) !== (b[1]>point[1]) && point[0]<(b[0]-a[0])*(point[1]-a[1])/(b[1]-a[1])+a[0]) inside=!inside;
+    }
+    return inside ? 1 : -1;
+  }
+  function covers(point, geometry) {
+    if (!Array.isArray(point) || point.length!==2 || !point.every(Number.isFinite)) return false;
+    const parts=geometry.type==="MultiPolygon" ? geometry.coordinates : geometry.type==="Polygon" ? [geometry.coordinates] : [];
+    return parts.some(rings=>ringLocation(point,rings[0])>=0 && rings.slice(1).every(hole=>ringLocation(point,hole)<=0));
+  }
+  function bounds(geometry) {
+    const points=geometry.coordinates.flat(geometry.type==="MultiPolygon" ? 2 : 1);
+    return [Math.min(...points.map(p=>p[0])),Math.min(...points.map(p=>p[1])),Math.max(...points.map(p=>p[0])),Math.max(...points.map(p=>p[1]))];
+  }
+  function archiveRadarTiles(at) {
+    const date=new Date(at);
+    if(!Number.isFinite(date.getTime()))return null;
+    date.setUTCMinutes(Math.floor(date.getUTCMinutes()/5)*5,0,0);
+    const stamp=[date.getUTCFullYear(),String(date.getUTCMonth()+1).padStart(2,"0"),String(date.getUTCDate()).padStart(2,"0"),String(date.getUTCHours()).padStart(2,"0"),String(date.getUTCMinutes()).padStart(2,"0")].join("");
+    return `/api/radar/tiles/${stamp}/{z}/{x}/{y}.png`;
+  }
+  function archiveRadarTileUrls(at, west, south, east, north, zoom) {
+    const template=archiveRadarTiles(at);
+    if(!template || ![west,south,east,north,zoom].every(Number.isFinite) || east<west || north<south)return [];
+    const z=Math.max(4,Math.min(12,Math.floor(zoom))), scale=2**z;
+    const xFor=longitude=>Math.max(0,Math.min(scale-1,Math.floor((longitude+180)/360*scale)));
+    const yFor=latitude=>{
+      const lat=Math.max(-85.05112878,Math.min(85.05112878,latitude))*Math.PI/180;
+      return Math.max(0,Math.min(scale-1,Math.floor((1-Math.asinh(Math.tan(lat))/Math.PI)/2*scale)));
+    };
+    const urls=[];
+    for(let x=xFor(west);x<=xFor(east);x++)for(let y=yFor(north);y<=yFor(south);y++)
+      urls.push(template.replace("{z}",z).replace("{x}",x).replace("{y}",y));
+    return urls;
+  }
+  function createSearch({get, element, token, geometry, select, isCellId=()=>false, request=fetch, schedule=setTimeout, cancel=clearTimeout}) {
+    const input=get("map-search"), list=get("map-search-results"), status=get("map-search-status");
+    let results=[], active=-1, version=0, controller, timer;
+    const message=text=>{status.textContent=text;};
+    function draw() {
+      list.replaceChildren(); list.hidden=results.length===0;
+      input.setAttribute("aria-expanded",String(results.length>0));
+      input.removeAttribute("aria-activedescendant");
+      results.forEach((feature,i)=>{
+        const label=feature.properties?.h3_index || feature.properties?.full_address || feature.properties?.name || "Location";
+        const option=element("li"); option.id=`map-search-option-${i}`;option.setAttribute("role","option");
+        option.setAttribute("aria-selected",String(i===active));
+        const button=element("button",label);
+        button.type="button";button.tabIndex=-1;button.onclick=()=>choose(i);option.append(button);list.append(option);
+        if(i===active)input.setAttribute("aria-activedescendant",option.id);
+      });
+    }
+    function invalidate() {version++;controller?.abort();cancel(timer);}
+    function choose(index) {
+      const feature=results[index]; if(!feature)return;
+      invalidate(); input.value=feature.properties?.h3_index || feature.properties?.full_address || feature.properties?.name || "Location";
+      results=[];active=-1;draw();select(feature);message("Location selected. Parcel and flood scores remain unknown.");
+      input.focus();
+    }
+    const enabled=Boolean(token?.startsWith("pk.") && geometry);
+    input.disabled=!enabled;get("map-search-clear").disabled=!enabled;
+    message(enabled ? "Search addresses and places in Okaloosa County." : "Search requires a configured map and an available county boundary.");
+    input.oninput=()=>{
+      invalidate(); results=[];active=-1;draw();
+      const query=input.value.trim(), ticket=version;
+      const cellId=query.toLowerCase();
+      if(isCellId(cellId)) {
+        results=[{type:"Feature",geometry:null,properties:{h3_index:cellId}}];
+        active=0;draw();message("Hex cell found. Press Enter to inspect it.");return;
+      }
+      if(query.length<3){message("Enter at least three characters.");return;}
+      message("Searching Okaloosa County…");
+      timer=schedule(async()=>{
+        controller=new AbortController();
+        try {
+          const params=new URLSearchParams({q:query,access_token:token,country:"us",bbox:bounds(geometry).join(","),types:"address,street,place,locality,neighborhood",autocomplete:"true",limit:"5"});
+          const response=await request(`https://api.mapbox.com/search/geocode/v6/forward?${params}`,{signal:controller.signal});
+          if(!response.ok)throw new Error("Search provider unavailable");
+          const data=await response.json(); if(ticket!==version)return;
+          results=(data.features||[]).filter(f=>f.geometry?.type==="Point" && covers(f.geometry.coordinates,geometry));
+          active=-1;draw();message(results.length ? `${results.length} county results. Use arrow keys and Enter to select.` : "No matching locations in Okaloosa County.");
+        } catch(error) {if(ticket===version && error.name!=="AbortError")message("Search unavailable. Try again shortly.");}
+      },300);
+    };
+    input.onkeydown=event=>{
+      if(event.key==="Escape"){invalidate();results=[];active=-1;draw();message("Search closed.");}
+      if(["ArrowDown","ArrowUp"].includes(event.key) && results.length){event.preventDefault();active=event.key==="ArrowDown"?(active+1)%results.length:active<=0?results.length-1:active-1;draw();}
+      if(event.key==="Enter"){event.preventDefault();if(results.length)choose(active<0?0:active);}
+    };
+    get("map-search-clear").onclick=()=>{invalidate();input.value="";results=[];active=-1;draw();select(null);message("Search cleared.");input.focus();};
+    return {close:()=>{invalidate();results=[];active=-1;draw();}};
+  }
+  const localTime=value=>new Date(value).toLocaleString("en-US",{timeZone:"America/Chicago",month:"short",day:"numeric",hour:"numeric",timeZoneName:"short"});
+  function createPlayback({get, select, prepare=()=>{}, every=setInterval, stop=clearInterval}) {
+    let kind="none", times=[], index=0, startIndex=0, timer=null, busy=false, selecting=null, generation=0, playGeneration=0, available=false, note="Waiting for imported forecast data.";
+    function draw() {
+      get("replay-play").textContent=timer===null ? "▶" : "Ⅱ";
+      get("replay-play").setAttribute("aria-label",timer===null?"Play Isaias timeline":"Pause playback");
+      get("replay-play").setAttribute("aria-pressed",String(timer!==null));
+      get("replay-prev").disabled=!available || busy || index===0;
+      get("replay-next").disabled=!available || busy || index>=times.length-1;
+      get("replay-play").disabled=!available || (busy && timer===null) || times.length<2;
+      get("replay-hour").disabled=!available || busy || times.length<2;
+      get("replay-hour").max=String(Math.max(0,times.length-1));get("replay-hour").value=String(index);
+      get("replay-hour").setAttribute("aria-valuetext",times[index]?localTime(times[index]):"Unavailable");
+      get("playback-clock").textContent=times[index] ? `${kind==="archive"?"Isaias":"Forecast"} · ${localTime(times[index])}` : "Isaias archive unavailable";
+      get("playback-status").textContent=busy?"Loading selected hour…":note;
+    }
+    function pause() {playGeneration++;if(timer!==null)stop(timer);timer=null;draw();}
+    function prepareNext() {
+      const ticket=playGeneration;
+      if(index+1<times.length) void Promise.resolve().then(()=>{if(timer!==null && ticket===playGeneration)return prepare(kind,index+1);}).catch(()=>{});
+    }
+    async function go(next) {
+      if(!available || busy || next<0 || next>=times.length)return;
+      const ticket=++generation;busy=true;selecting=next;draw();
+      try {
+        const ok=await select(kind,next);
+        if(ticket!==generation)return;
+        if(ok===false){note="Selected hour unavailable. Playback paused.";pause();return false;}
+        index=next;if(index===times.length-1)pause();else if(timer!==null)prepareNext();
+        return true;
+      } catch(error) {if(ticket===generation){note=`Selected hour unavailable. Playback paused.${error?.message ? ` ${error.message}` : ""}`;pause();}return false;}
+      finally {if(ticket===generation){busy=false;draw();}}
+    }
+    get("replay-prev").onclick=()=>{pause();return go(index-1);};
+    get("replay-next").onclick=()=>{pause();return go(index+1);};
+    get("replay-hour").oninput=()=>{const next=Number(get("replay-hour").value);pause();return go(next);};
+    get("replay-play").onclick=async()=>{
+      if(timer!==null){pause();return;}
+      if(!available || busy || times.length<2)return;
+      const playTicket=playGeneration;
+      if(index===times.length-1 && await go(startIndex)!==true)return;
+      if(playTicket!==playGeneration)return;
+      if(!available || index===times.length-1)return;
+      timer=every(()=>{if(!busy)void go(index+1);},250);prepareNext();draw();
+    };
+    return {pause, get playing(){return timer!==null;}, configure(nextKind,nextTimes,nextIndex=0,enabled=true,message="Following six-hour rainfall · mm / 6h",defaultIndex=0) {
+      if(nextKind!==kind || (busy && nextIndex!==selecting)){pause();generation++;busy=false;}
+      kind=nextKind;times=nextTimes;index=nextIndex;available=enabled && times.length>0;note=message;
+      startIndex=Number.isInteger(defaultIndex) && defaultIndex>=0 && defaultIndex<times.length ? defaultIndex : 0;
+      if(!available)pause();draw();
+    }};
+  }
+  return {covers,bounds,archiveRadarTiles,archiveRadarTileUrls,createSearch,createPlayback,localTime};
+});

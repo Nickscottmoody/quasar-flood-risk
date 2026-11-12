@@ -1,0 +1,112 @@
+# Real-data runtime activation
+
+The [current operations runbook](datathon-submission/operations.md) adds verification and an optional catalog candidate; it does not replace the active directory release below. Hosted access is public; source API authentication remains required.
+
+## Exposure activation
+
+On October 18 UTC (October 17 Central), authorized activation switched Quasar
+to `/opt/quasar/releases/edmonton-exposure-20261018`. The existing staged model
+under `/home/linux1/quasar-stage1` was present but disconnected from the running
+service; public `/api/exposure` returned `not_configured`.
+
+The active `QUASAR_EXPOSURE_DIRECTORY` is
+`/srv/quasar/data/processed/okaloosa/modeling/edmonton-20261018/replay`.
+All 25 hourly positions from October 9 05:00 UTC through October 10 05:00 UTC
+have separate, exact six-hour assessments. Every window represents 113,818
+parcels: **112,120 scored, 1,698 unknown** (1,538 incomplete terrain inputs and
+160 outside training ranges). Parcel 19144 has complete inputs and a known score.
+Missing inputs remain unknown; there was no imputation, retraining or cloud query.
+
+The staged artifact uses model version `mapped-susceptibility-v1-7673922e5dca`,
+portable hash `5fbfe10500f05e1b5fbd16ebc622b52596489aa19aea479ab063cf872d0535a7`
+and training dataset ID `8ab0884720f21ce9fe492b8c1aabe317e28850f82857ab0dff880a3a1c057179`.
+Its matching evaluation is retained; these identities differ from the earlier
+local artifact report and must not be substituted into that historical record.
+The inventory and boundary match the audited Marseille inspection inputs.
+
+The first window used repository inference. The existing host producer's faster
+numeric-tree evaluator agreed across all 112,120 eligible parcels, with maximum
+static prediction/explanation difference `8.881784197001252e-16`. Every artifact
+passed the new serving validator and R4–R7 aggregation benchmark on `s390x`:
+approximately 25–93 seconds per window, under 276 MiB peak RSS per benchmark.
+These are execution checks, not observed-flood validation.
+
+The environment/service backup and previous release pointer are under
+`/etc/quasar/backups/edmonton-exposure-20261018`. Only Quasar was restarted;
+credentials, Caddy/TLS and Vercel settings were preserved. The systemd service
+and saved assessments operate independently of Conductor workspaces and PRs.
+Reload an already-open map to discard cached `not_configured` responses.
+Host manifests and benchmarks live beside the replay directory; local verification
+receipts are ignored under `.context/activation/`.
+
+## October 18 activation
+
+The Marseille activation replaced the older standalone Miami-Dade bridge with
+this repository's authenticated Okaloosa API runtime on LinuxONE (`s390x`).
+The active inspection artifact is
+`data/processed/okaloosa/parcel-inspection/20261018-marseille/` (113,818 parcels).
+It was built from the existing reconciled inputs, exact county boundary and
+45-cell Isaias archive, with no new cloud queries.
+
+Authenticated public HTTPS checks confirmed the manifest, parcel 24759 and R7
+cell 8744e5a59ffffff. The parcel has complete FEMA coverage, a 9.424685 m mean
+terrain elevation and one native forecast overlap. The cell has 3,072 distinct
+indexed parcels. No exposure artifact exists; the API returns `not_configured`
+without a fabricated score. Unauthenticated source endpoints still reject reads.
+
+Service/proxy configuration backups are on the host under
+`/etc/quasar/backups/marseille-20261018`. The previous standalone bridge remains
+under `/opt/quasar/bridge`. Host-specific activation files and verification
+receipts are ignored under `.context/rollout/` and `.context/checks/`.
+
+Activation requires explicit approval for the LinuxONE service/proxy restart,
+Vercel Preview environment changes and a Preview deployment. Preparing artifacts
+and passing tests do not activate the hosted application.
+
+## Prepared and verified
+
+The reconciled Okaloosa inventory has 113,818 parcel records. The earlier prepared inspection
+artifact was `data/processed/okaloosa/parcel-inspection/20261018-real-data/`, with
+113,818 parcel contexts and 833 indexed H3 contexts across resolutions 4–7.
+Preparation validates the source database, reconciled inputs, exact county
+boundary, inventory identity and checksums. All scores remain unknown.
+The manifest is the completion marker; transfer both files unchanged.
+
+The imported October 9 archive has 45 native cells and 25 hourly positions.
+The existing current snapshot has expired under the unchanged freshness policy.
+This change runs no cloud query and does not manufacture fresh timestamps.
+
+## Activation sequence after approval
+
+1. Back up the active Caddyfile, service unit and private environment file.
+   Keep the currently running bridge code for rollback.
+2. Transfer the reviewed Python package into a new immutable directory under
+   `/opt/quasar/releases/` and the inspection directory under
+   `/srv/quasar/data/processed/okaloosa/parcel-inspection/`. Verify the transferred
+   hashes against their local manifests before switching `/opt/quasar/current`.
+3. Add the two path settings in `ops/linuxone/bridge.env.additions.example` to
+   the existing private `/etc/quasar/bridge.env`. Preserve existing credentials
+   and forecast paths. Install `ops/linuxone/quasar-bridge.service` and the
+   prepared Caddy route change, retaining the existing host/TLS configuration.
+   Run Caddy config validation and systemd unit validation before reloading.
+4. Restart Quasar and reload Caddy. Verify authenticated public snapshot,
+   manifest, parcel context and cell summary requests; confirm matching FIPS,
+   inventory/checksum IDs and actual `s390x` host. Missing exposure results must
+   stay explicitly unavailable. Unauthorized requests must fail, and the proxy
+   must continue blocking all other application paths.
+5. Run `scripts/configure_vercel_bridge.py` with the existing SSH identity,
+   target, HTTPS origin, Vercel scope and project. Its default verifies the source
+   and lists four pending Preview settings; `--apply` writes those settings.
+   It reads credentials through SSH into memory and passes values to Vercel on
+   stdin. It never writes credentials into the repository or deploys.
+6. Deploy the reviewed feature branch to Vercel Preview. Verify the real-data
+   APIs through the public hosted application, expiry behavior, archive and parcel input
+   reads. Isaac reviews the map. Do not promote production or push main.
+
+`.context/rollout/` holds the exact host-specific config changes and real-artifact
+verification receipt for this workspace. These files are intentionally ignored.
+
+For rollback, restore the previous service/Caddy/environment files and previous
+package pointer, validate configurations, then restart/reload. Restore previous
+Vercel Preview settings and retain the previous immutable deployment. Rollback
+must not replace real-data failures with synthetic values.

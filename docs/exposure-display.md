@@ -1,0 +1,232 @@
+# Experimental relative exposure display
+
+## Tools: V1 / V2 model selection
+
+Tools contains an **Exposure model** selector. V1 explicitly selects the original
+served mapping model. V2 selects the revised model trained only on parcels with
+positive verified FEMA overlap; its internal v4 identity records the later
+user-requested qualification-policy change. Product labels and full artifact
+identities are separate. Calculation details retain exact model/evaluation IDs.
+
+The app requests `model=v1` or `model=v2` on summary and parcel API calls.
+Changing selection pauses playback, invalidates pending responses and all score
+caches, and loads the selected version for the same hour and geography. Geometry
+and archive data are retained. A late response for the old choice cannot recolor
+the new selection. Missing, stale, unconfigured or mismatched versions stay
+unavailable; the app never substitutes the other choice.
+
+On the inventory host configure `QUASAR_EXPOSURE_V1_DIRECTORY` and
+`QUASAR_EXPOSURE_V2_DIRECTORY`. The service pins the reviewed V1 and V2 release
+identities in code, so these environment variables are optional. Set
+`QUASAR_EXPOSURE_V1_MODEL_VERSION` or `QUASAR_EXPOSURE_V2_MODEL_VERSION` only
+when deliberately serving a different reviewed identity; the proxy and inventory
+host must use the same override. Each choice also supports its own `_DATABASE`
+(prepared indexed serving), `_CATALOG`/`_ARTIFACT_ROOT` (verified immutable
+release), or optional `_FILE` for one window; `_FILE` and `_DIRECTORY` are
+mutually exclusive within a choice. The hosted proxy uses the same built-in
+pins. Its authenticated upstream request forwards `model`, verifies
+the response's `model_choice` and exact identity, and keeps errors explicit.
+Only the whitelist `v1`/`v2` is accepted; user input never supplies filesystem
+paths. Legacy requests without `model` retain their previous configuration. Explicit choices never borrow the generic indexed database or catalog.
+
+The prepared local comparison has both 25-hour bundles, a verified original-v1
+download receipt, and the newly generated V2 assessments. Ignored
+`.context/exposure-comparison.env` records local paths and identities for review;
+it contains no credentials. No service was started or deployed to create it.
+Switching these models is a method comparison on different training populations,
+not flood-outcome validation or proof that one is more accurate countywide.
+
+The [positive-overlap model](modeling-positive.md) additionally declares its
+conditional population in metadata. Zero or unverified FEMA overlap stays
+unscored, with the full county retained in H3 coverage denominators. Both local
+artifact loading and the proxy reject known scores outside that model's scope.
+
+For the retrained FEMA proxy, see the [v2 protocol](modeling-v2.md). V2 exposes
+dataset/evaluation identity and summary mapping errors in the existing calculation
+details. Actual FEMA mapped fraction stays separate from the model estimate.
+`QUASAR_EXPOSURE_REQUIRED_MODEL_VERSION` optionally pins either the inventory
+service or proxy to the reviewed exact model identity; a mismatch is unavailable,
+with no fallback to the archived v1. Source changes alone do not activate v2.
+
+The map uses fixed green/yellow/orange/red anchors for experimental exposure
+indices. It is not a trained parcel flood model, flood probability, depth, or
+safety assessment. **Green does not establish safety.** Existing real-parcel
+`risk_score` and `risk_band` remain null/unknown.
+
+| Index | Label | Color anchor |
+| --- | --- | --- |
+| 0–34 | Lower relative exposure | Green `#16a34a` at 0 |
+| 35–64 | Moderate relative exposure | Yellow `#eab308` at 35 |
+| 65–84 | Elevated relative exposure | Orange `#f97316` at 65 |
+| 85–100 | Highest relative exposure | Red `#dc2626` at 85 and 100 |
+| Unknown | Insufficient data | Transparent interior; thin outline |
+
+Colors interpolate in RGB between fixed anchors. Labels change at 35, 65 and
+85, including fractional indices. Hour and zoom never renormalize the scale.
+The source of truth is `quasar/static/exposure-scale.json`, supplied through
+`/api/config`. Numeric indices, explanations and a gradient legend accompany color.
+
+The selection panel leads with the selected six-hour window and rainfall or
+exposure band. Parcel summaries show mean terrain, mapped special flood hazard
+area fraction and mapped river/stream distance. Cell summaries show full indexed
+parcel count, elevated-index count (65+) and assessment coverage, with unassessed
+parcels called out explicitly. Reference-zone and terrain coverage notes retain
+unknown states. Parcel browsing, model diagnostics, reference inputs and source
+metadata are expandable; loading failures and retry controls remain visible.
+
+## Explicit assessments
+
+Geometry-only databases contain no exposure assessments. Set
+`QUASAR_EXPOSURE_FILE` and `QUASAR_PARCEL_DATABASE` on LinuxONE to consume explicit
+results from a separately documented scoring method. Existing parcel API
+authentication also protects `/api/exposure`; set `QUASAR_PARCEL_API_TOKEN` to
+32+ characters. Never expose that token to the browser.
+
+For hourly playback, configure `QUASAR_EXPOSURE_DIRECTORY` **instead of**
+`QUASAR_EXPOSURE_FILE`. Store one existing schema-1 assessment per UTC start,
+named `YYYYMMDDTHHMMSSZ.json` (for example `20261009T050000Z.json`). Each file
+retains its own forecast provenance and 128 MiB limit. The API reads only the
+exact requested whole-hour file and still verifies its internal window,
+inventory, model diagnostics and freshness. Missing hours stay unavailable;
+there is no nearest-hour substitution. Setting both sources is an explicit
+configuration error. The authenticated proxy and browser API are unchanged.
+
+The October 9 Central replay needs 25 six-hour assessments starting hourly from
+`2026-10-09T05:00:00Z` through `2026-10-10T05:00:00Z`, inclusive. Run the existing
+`python3 -m quasar.modeling assess` command for each start with `--mode replay`
+and `--output <directory>/<UTC-start>.json`, using the same verified model,
+evaluation, inputs, inspection and archive paths. Benchmark the results before
+activation. Generate into a new ignored directory; configure that directory on
+the inventory host only after generation and verification complete. A single
+73 MB county assessment cannot populate the full replay, and combining 25 into
+one file would exceed the serving limit. Do not retrain to activate existing weights.
+
+Playback advances one hour every 250 ms when inputs are ready. Exposure playback
+buffers only the next hour's summaries in bounded session memory, without
+displaying future values. It waits for the displayed hour's summaries and selected parcel
+assessment before advancing again; other parcels hydrate in the background and
+remain unknown until matching results arrive. While those requests are pending, the selected
+hour shows loading and unknown scores; Pause remains available. An unavailable
+response pauses playback with its error rather than skipping through later hours.
+Recheck source retries the selected hour without discarding cached parcel geometry.
+Rainfall playback uses the loaded archive and does not request exposure assessments.
+
+If the inspector says the exposure service is **not configured**, this is a
+service-level gap, not proof that the selected parcel lacks terrain or FEMA data.
+Check the assessment source and `QUASAR_PARCEL_DATABASE` on the inventory host.
+`QUASAR_PARCEL_CONTEXT_DIRECTORY` supplies descriptive inputs only. Once the
+configured service is active, **Refresh parcels** requests fresh assessments.
+Parcel-level missing reasons are meaningful only after a matching run is served.
+
+The original display change adds no scoring formula or training dataset. Optional
+[offline modeling](modeling.md) can produce FEMA mapping proxy assessments after
+promotion gates pass, separately from any validated flood predictor. Missing assessments stay unknown
+with transparent interiors. Fictional sites are not served by the application.
+
+Schema 1 example (**synthetic format documentation**, not real parcel data):
+
+```json
+{
+  "schema_version": 1,
+  "county_fips": "12091",
+  "run_id": "synthetic-format-example",
+  "method_version": "synthetic-method-example",
+  "inventory_id": "matching-source-provenance-output-sha256",
+  "windows": [{
+    "valid_from": "2026-10-09T05:00:00Z",
+    "valid_to": "2026-10-09T11:00:00Z",
+    "computed_at": "2026-10-17T12:00:00Z",
+    "parcels": [{
+      "parcel_id": 1,
+      "score": 70,
+      "factors": [{"name": "synthetic_factor", "value": "synthetic example", "contribution": 70}],
+      "missing": []
+    }]
+  }]
+}
+```
+
+Indices must be finite numbers from 0 to 100. Known indices require no missing
+inputs and named, nonnegative contributions summing to the index within 0.11
+points (rounding tolerance). Missing inputs require null indices. Omitted records
+also remain unknown. Duplicate IDs/windows, out-of-inventory IDs, wrong county,
+inventory mismatch and invalid values invalidate the artifact. Windows are
+exactly six hours; timestamps require timezones. Files are limited to 128 MiB,
+read-only and cached by file version. Publish atomically.
+
+## Complete-inventory summaries
+
+`GET /api/exposure?from=<UTC>&to=<UTC>&mode=current|replay&resolution=4|5|6|7`
+returns summaries keyed by indexed H3 cell. Every parcel in the database cell
+membership contributes to coverage; absent assessments are unknown. Client
+pagination never changes a cell's color.
+
+- Color value: linear-interpolated P90 at sorted position `(n-1)*0.9`, using
+  eligible indices. Zero is valid; no eligible indices produce null.
+- Coverage: scored / full parcel count. Incomplete coverage is reported in inspection details.
+- Elevated count: number of parcel indices >=65, including highest indices.
+- Unoccupied or unassessed cells have transparent interiors and thin outlines.
+- Memberships use intersecting polygons: a parcel can occur in several cells.
+  Do not sum cell counts as a distinct county parcel count.
+
+`parcel_ids=<comma-separated IDs>` returns up to 100 assessments instead of cell
+summaries. Supply the summary's `run_id`; a changed run returns `status: changed`
+without indices. Responses include method/run/inventory identity, forecast
+window, computation time, scale version and actual aggregation host architecture.
+
+Current results expire at window end or after two hours since computation.
+Future computation timestamps are invalid. Replay permits deliberate past
+windows without today's freshness cutoff. Missing exact windows and invalid or
+stale artifacts return explicit status without indices. Retired synthetic and what-if application routes cannot consume these artifacts.
+
+## LinuxONE and hosted behavior
+
+Run aggregation on the actual LinuxONE host. With `QUASAR_LINUXONE_API_URL` and
+`QUASAR_LINUXONE_API_TOKEN` set, the web host proxies `/api/exposure` through
+authenticated HTTPS. It never recomputes a local substitute when that service
+fails. Forward `/api/exposure` through the existing parcel reverse proxy with
+the same authentication header. This code does not modify infrastructure.
+
+`aggregation_architecture` records the actual summary host. Local synthetic tests
+do not establish IBM Z execution, configured real assessments or visual acceptance.
+Changing scenario/hour retains cached parcel geometry and the selected cell/parcel
+while clearing previous exposure indices until matching assessments arrive. Late
+responses cannot repopulate closed or superseded selections.
+
+## Optional modeling fields (schema 1, additive)
+
+Legacy artifacts remain supported. Model artifacts add validated `model_metadata`
+(schema/version, proxy target, policy, promoted flag, model hash and notice) and
+`forecast_provenance` (init/publication/import/valid/expiry times, source table/hash,
+native resolution/statistic/units, mode and availability basis). These fields pass
+through local and authenticated proxy responses. Current source expiry invalidates
+server results and browser colors; recomputation cannot extend source validity.
+
+Known model records require `model_details`: susceptibility, raw susceptibility,
+six-hour rainfall mm, rainfall stress, ensemble instability, raw baseline and six
+signed tree-path attributions. Validators check finite values/ranges, policy
+arithmetic and baseline plus attribution sum. One nonnegative
+`susceptibility_rainfall_interaction` factor accounts for the final index; signed
+model explanations remain separate. Invalid diagnostics fail closed. Parcel
+inspection labels the mapping proxy, visualization rule, instability and source
+times explicitly. None of these values establish flood depth, probability,
+confidence intervals or safety.
+
+## Multiple exact-window artifacts
+
+The optional server-only catalog and artifact root select immutable schema-1
+single-window files without changing the exposure API. Catalog beats the legacy
+file/directory settings; failures/missing windows never substitute prior results.
+All selected files must match the catalog county, inventory, model hash, forecast
+hash, mode and exact six-hour interval. Absolute/traversing/escaping-symlink paths,
+duplicate keys, invalid hashes and corrupt files fail closed. Source provenance
+stays inside each artifact, rather than combining different windows under one
+shared top-level record. One decoded artifact is retained; cached H3 summaries
+contain counts/statistics, not additional full parcel maps.
+
+The offline `assess-replay` command lists the actual 25 saved archive windows and
+requires `--execute` for production into a new release directory. Its coverage
+report distinguishes produced windows and genuine source gaps; a producer error
+prevents catalog publication. Code/fixture acceptance does not establish real
+all-hour coverage, target-host resources or activation. See the [catalog contract](data-contract.md#exact-window-exposure-catalog-server-only-version-1) and
+[operations/rollback](datathon-submission/operations.md).
