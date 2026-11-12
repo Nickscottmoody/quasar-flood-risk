@@ -8,11 +8,11 @@ Quasar follows the team's Flood Emergency Alert System proposal, narrowed to **O
 
 Built at the IBM Z Datathon by:
 
-- Nicholas Moody
-- Ayaan Masarrat
-- Rahul Thokala
-- Isaac Berg
-- Adi Baskar
+- Nicholas Moody — modeling
+- Ayaan Masarrat — frontend
+- Rahul Thokala — data and modeling
+- Isaac Berg — integration
+- Adi Baskar — modeling
 
 ## Documentation
 
