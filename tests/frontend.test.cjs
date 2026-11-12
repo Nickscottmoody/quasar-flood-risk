@@ -41,6 +41,15 @@ async function boot({configured=false, forecastMode="county_archive", mixed=fals
       if(featureState)this.setFeatureState=({source,id},state)=>{(this.featureStates[source] ||= {})[id]={...(this.featureStates[source]?.[id] || {}),...state};}; }
     resize() { resizeCount++; }
     getZoom() { return this.zoom ?? this.options.zoom; }
+    // Playback prefetch reads the viewport before buffering the next hour's
+    // exposure summaries, and loadParcelExposure calls contains() to prioritize
+    // visible parcels. Without getBounds the preload throws, prepareNext()
+    // swallows the rejection, and the exposure buffer is silently skipped.
+    getBounds() {
+      const [west,south,east,north]=[-86.8,30.35,-86.3,30.95];
+      return {getWest:()=>west,getSouth:()=>south,getEast:()=>east,getNorth:()=>north,
+        contains:([lng,lat])=>lng>=west && lng<=east && lat>=south && lat<=north};
+    }
     flyTo(options) { this.zoom=options.zoom; this.lastFlight=options; }
     fitBounds(bounds,options) { this.lastBounds={bounds,options}; }
     getCanvas() { return {clientWidth:1200,style:{}}; }
