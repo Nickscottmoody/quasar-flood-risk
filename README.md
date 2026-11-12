@@ -13,6 +13,7 @@ Built at the IBM Z Datathon by:
 - Rahul Thokala — data and modeling
 - Isaac Berg — integration
 - Adi Baskar — modeling
+- Sharwajith Srinivasan — data
 
 ## Documentation
 
