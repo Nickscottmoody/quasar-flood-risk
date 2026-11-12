@@ -23,3 +23,6 @@ vercel-output/
 .context/
 .vercel
 .env*
+
+# Keep the example config tracked: it must win over the .env* rule above.
+!.env.example
