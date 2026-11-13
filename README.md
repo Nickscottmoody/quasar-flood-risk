@@ -4,6 +4,20 @@ Okaloosa County flood risk intelligence starter for the IBM Z Datathon.
 
 Quasar follows the team's Flood Emergency Alert System proposal, narrowed to **Okaloosa County, Florida (FIPS `12091`)**. The application displays sourced county parcels, prepared reference inputs and imported native forecast rainfall.
 
+## Demo
+
+![Map overview with the archived NEXRAD radar mosaic, the county-clipped H3 rainfall grid and the hourly replay timeline](docs/images/map-overview-radar-replay.webp)
+
+Archived Isaias radar for Okaloosa County with county-clipped H3 rainfall cells
+and the hourly replay scrubber. Each hex takes the maximum of its overlapping
+native forecasts; missing overlaps stay transparent.
+
+![Parcel exposure detail with the cell overview panel showing assessed, unassessed and elevated parcel counts](docs/images/parcel-exposure-detail.webp)
+
+Parcel-level relative exposure for a selected H3 cell. Coverage, unassessed
+counts and the model version stay visible: missing results are shown as unknown
+rather than low.
+
 ## Team
 
 Built at the IBM Z Datathon by:
